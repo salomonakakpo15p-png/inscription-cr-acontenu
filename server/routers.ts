@@ -41,7 +41,9 @@ export const appRouter = router({
         if (!ENV.adminPassword) {
           throw new TRPCError({
             code: "FORBIDDEN",
-            message: "ADMIN_PASSWORD manquant : ajoutez-le au fichier .env.",
+            message: process.env.VERCEL
+              ? "ADMIN_PASSWORD manquant : ajoutez la variable ADMIN_PASSWORD dans Vercel (Settings → Environment Variables), puis redéployez."
+              : "ADMIN_PASSWORD manquant : ajoutez-le au fichier .env.",
           });
         }
         const provided = Buffer.from(input.password, "utf8");

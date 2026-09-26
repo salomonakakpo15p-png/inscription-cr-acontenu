@@ -6,5 +6,15 @@ export default function handler(_req: unknown, res: {
 }) {
   res.statusCode = 200;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.end(JSON.stringify({ ok: true, node: process.version, vercel: Boolean(process.env.VERCEL) }));
+  res.end(
+    JSON.stringify({
+      ok: true,
+      node: process.version,
+      vercel: Boolean(process.env.VERCEL),
+      // booleans only: tell whether the required variables are picked up
+      adminConfigured: Boolean(process.env.ADMIN_PASSWORD),
+      jwtConfigured: Boolean(process.env.JWT_SECRET),
+      databaseConfigured: Boolean(process.env.DATABASE_URL),
+    }),
+  );
 }
