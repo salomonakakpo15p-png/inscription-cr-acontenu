@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { EVENT, EVENT_DATE_UPPER, EVENT_DATETIME_LONG } from "@shared/event";
 import { trpc } from "@/lib/trpc";
 import { composePoster, defaultPhotoTransform, loadImage, type PhotoTransform } from "@/lib/poster";
+import { compressPhoto } from "@/lib/photo";
 
 type Draft = { lastName: string; firstName: string; country: string; photoData?: string; photoTransform: PhotoTransform };
 
@@ -61,7 +62,7 @@ export default function Home() {
     }
     const reader = new FileReader();
     reader.onload = async () => {
-      const data = String(reader.result);
+      const data = await compressPhoto(String(reader.result));
       setPhotoData(data);
       setPhotoName(file.name);
       setIsAnalyzingPhoto(true);
@@ -150,7 +151,7 @@ export default function Home() {
                 <div className="form-intro"><span className="step-badge">01</span><div><h3>Vos informations</h3><p>Les champs marqués d’un astérisque sont obligatoires.</p></div></div>
                 <div className="form-row"><label>Nom <span>*</span><input required value={form.lastName} onChange={(e) => setForm({ ...form, lastName: e.target.value })} placeholder="Ex. ADJOVI" autoComplete="family-name" /></label><label>Prénom <span>*</span><input required value={form.firstName} onChange={(e) => setForm({ ...form, firstName: e.target.value })} placeholder="Ex. Grâce" autoComplete="given-name" /></label></div>
                 <label>Pays de résidence <span>*</span><input required value={form.country} onChange={(e) => setForm({ ...form, country: e.target.value })} placeholder="Ex. Bénin" autoComplete="country-name" /></label>
-                <div className="photo-field"><div className="photo-field-heading"><span className="photo-step">02</span><div><strong>Votre photo <small>(optionnel)</small></strong><p>Votre visage sera automatiquement centré dans le cadre noir.</p></div></div>{photoData ? <><div className="photo-selected"><img src={photoData} alt="Aperçu de votre photo" /><div><strong>{photoName}</strong><span>{isAnalyzingPhoto ? "Analyse du visage…" : "Visage centré automatiquement"}</span></div><button type="button" aria-label="Retirer la photo" onClick={() => { setPhotoData(undefined); setPhotoName(undefined); setPhotoTransform(defaultPhotoTransform); }}><X size={16} /></button></div><div className="crop-editor automatic-crop"><div className="crop-frame"><img src={photoData} alt="Aperçu du centrage automatique" style={cropPreviewStyle(photoTransform)} /></div><div className="auto-crop-info"><strong>{isAnalyzingPhoto ? "Détection en cours…" : "Cadrage automatique activé"}</strong><p>Le visage est placé au centre de l’affiche. Si la détection n’est pas disponible, un centrage général est appliqué.</p><span><Sparkles size={13} /> Ajustement prêt pour la génération</span></div></div></> : <label className="photo-dropzone"><ImagePlus size={20} /><span><strong>Ajouter une photo</strong><small>JPG, PNG ou WebP · 5 Mo max.</small></span><input type="file" accept="image/jpeg,image/png,image/webp" onChange={handlePhoto} /></label>}</div>
+                <div className="photo-field"><div className="photo-field-heading"><span className="photo-step">02</span><div><strong>Votre photo <small>(optionnel)</small></strong><p>Votre visage sera automatiquement centré dans le cadre noir.</p></div></div>{photoData ? <><div className="photo-selected"><img src={photoData} alt="Aperçu de votre photo" /><div><strong>{photoName}</strong><span>{isAnalyzingPhoto ? "Analyse du visage…" : "Visage centré automatiquement"}</span></div><button type="button" aria-label="Retirer la photo" onClick={() => { setPhotoData(undefined); setPhotoName(undefined); setPhotoTransform(defaultPhotoTransform); }}><X size={16} /></button></div><div className="crop-editor automatic-crop"><div className="crop-frame"><img src={photoData} alt="Aperçu du centrage automatique" style={cropPreviewStyle(photoTransform)} /></div><div className="auto-crop-info"><strong>{isAnalyzingPhoto ? "Détection en cours…" : "Cadrage automatique activé"}</strong><p>Le visage est placé au centre de l’affiche. Si la détection n’est pas disponible, un centrage général est appliqué.</p><span><Sparkles size={13} /> Ajustement prêt pour la génération</span></div></div></> : <label className="photo-dropzone"><ImagePlus size={20} /><span><strong>Ajouter une photo</strong><small>JPG, PNG ou WebP · 5 Mo max · optimisée automatiquement</small></span><input type="file" accept="image/jpeg,image/png,image/webp" onChange={handlePhoto} /></label>}</div>
                 <div className="privacy-note"><ShieldCheck size={17} /><span>Vos informations servent uniquement à gérer les inscriptions et générer votre affiche.</span></div>
                 <button className="submit-button" type="submit" disabled={createParticipant.isPending}>{createParticipant.isPending ? "Enregistrement…" : "Je confirme ma présence"}<ArrowRight size={18} /></button>
               </form>
