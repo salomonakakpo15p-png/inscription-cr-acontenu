@@ -1,0 +1,1 @@
+ALTER TABLE `participants` ADD `photoUrl` varchar(512);

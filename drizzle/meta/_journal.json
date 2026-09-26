@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1789929978400,
+      "tag": "0000_misty_young_avengers",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1789930070645,
+      "tag": "0001_wealthy_ronan",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1789930355743,
+      "tag": "0002_material_mad_thinker",
+      "breakpoints": true
+    }
+  ]
+}
