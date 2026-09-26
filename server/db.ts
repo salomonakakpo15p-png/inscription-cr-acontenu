@@ -11,6 +11,7 @@ import {
   users,
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
+import { LOCAL_DATA_DIR } from "./_core/paths";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 let _warned = false;
@@ -29,7 +30,7 @@ export async function getDb() {
 
 // Local file fallback used when DATABASE_URL is not configured, so
 // registrations still work on a machine without a MySQL server.
-const DATA_DIR = path.resolve(process.cwd(), "data");
+const DATA_DIR = LOCAL_DATA_DIR;
 const PARTICIPANTS_FILE = path.join(DATA_DIR, "participants.json");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
 

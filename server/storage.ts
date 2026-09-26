@@ -7,9 +7,10 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { ENV } from "./_core/env";
+import { LOCAL_DATA_DIR } from "./_core/paths";
 
 /** Where local uploads land when the Forge backend is not configured. */
-export const LOCAL_UPLOAD_DIR = path.resolve(process.cwd(), "data", "uploads");
+export const LOCAL_UPLOAD_DIR = path.join(LOCAL_DATA_DIR, "uploads");
 
 function getForgeConfig() {
   const forgeUrl = ENV.forgeApiUrl;
