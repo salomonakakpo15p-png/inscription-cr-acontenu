@@ -9,13 +9,14 @@ export default function handler(_req: unknown, res: {
   // Names only (never values): shows which variables the function actually
   // receives, so a typo such as Admin_Password is visible immediately.
   const seenKeys = Object.keys(process.env)
-    .filter(key => /^(ADMIN|JWT|DATABASE|OAUTH|OWNER|VITE_APP)/i.test(key))
+    .filter(key => /ADMIN|JWT|DATABASE|MYSQL|OAUTH|OWNER|PASS|SECRET|TOKEN|VITE_/i.test(key))
     .sort();
   res.end(
     JSON.stringify({
       ok: true,
       node: process.version,
       vercel: Boolean(process.env.VERCEL),
+      envCount: Object.keys(process.env).length,
       seenKeys,
       // booleans only: tell whether the required variables are picked up
       adminConfigured: Boolean(process.env.ADMIN_PASSWORD),
