@@ -16,6 +16,7 @@ export default function handler(_req: unknown, res: {
       ok: true,
       node: process.version,
       vercel: Boolean(process.env.VERCEL),
+      vercelEnv: process.env.VERCEL_ENV ?? null,
       envCount: Object.keys(process.env).length,
       seenKeys,
       // booleans only: tell whether the required variables are picked up
