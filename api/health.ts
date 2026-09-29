@@ -19,9 +19,12 @@ async function etagDiag(): Promise<Record<string, unknown>> {
   try {
     const h = await head("participants.json", {});
     const g = await get("participants.json", { access: "private", useCache: false });
+    const gEtag = g?.blob?.etag;
     out.headEtag = h.etag?.slice(0, 20) ?? null;
-    out.getEtag = g?.blob?.etag?.slice(0, 20) ?? null;
-    out.etagsAgree = h.etag === g?.blob?.etag;
+    out.getEtag = gEtag?.slice(0, 20) ?? null;
+    out.getEtagWeak = gEtag?.startsWith("W/") ?? null;
+    out.etagsAgree = h.etag === gEtag;
+    out.hashesAgree = Boolean(h.etag && gEtag && h.etag === gEtag.replace(/^W\//, ""));
     out.size = h.size;
   } catch (error) {
     out.readError = errText(error);
@@ -37,28 +40,6 @@ async function etagDiag(): Promise<Record<string, unknown>> {
       out.conditionalWrite = errText(error);
     }
     out.scratchEtag = etag?.slice(0, 20) ?? null;
-
-    // Same flow as the app: read participants.json and rewrite it unchanged,
-    // once with the weak etag from get() and once with the strong etag from
-    // head() — both writes are byte-identical, so they change nothing.
-    const read = await get("participants.json", { access: "private", useCache: false });
-    if (!read || read.statusCode !== 200 || !read.stream) throw new Error("participants.json unreadable");
-    const body = await new Response(read.stream).text();
-    const weak = read.blob.etag;
-    const opts = { access: "private" as const, allowOverwrite: true, contentType: "application/json" };
-    try {
-      await put("participants.json", body, { ...opts, ifMatch: weak });
-      out.rewriteWithGetEtag = "ok";
-    } catch (error) {
-      out.rewriteWithGetEtag = errText(error);
-    }
-    try {
-      const strong = (await head("participants.json", {})).etag;
-      await put("participants.json", body, { ...opts, ifMatch: strong });
-      out.rewriteWithHeadEtag = "ok";
-    } catch (error) {
-      out.rewriteWithHeadEtag = errText(error);
-    }
   } catch (error) {
     out.conditionalWrite = `setup: ${errText(error)}`;
   }

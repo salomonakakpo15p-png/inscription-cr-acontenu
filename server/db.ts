@@ -116,7 +116,7 @@ async function updateRows<T>(
 ): Promise<void> {
   await serialize(name, async () => {
     let lastError: unknown;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
       const { rows, etag } = await readRows<T>(name, revive);
       await mutate(rows);
       try {
@@ -125,6 +125,8 @@ async function updateRows<T>(
       } catch (error) {
         lastError = error;
         if (!isPreconditionFailed(error)) throw error;
+        // Another instance won the race: back off, then re-read its rows.
+        await new Promise(resolve => setTimeout(resolve, 40 * (attempt + 1)));
       }
     }
     throw lastError;

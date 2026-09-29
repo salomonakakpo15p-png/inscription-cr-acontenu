@@ -117,18 +117,21 @@ function isBlobEnabled() {
 function isPreconditionFailed(error) {
   return error instanceof BlobPreconditionFailedError;
 }
+function strongEtag(etag) {
+  return etag.startsWith("W/") ? etag.slice(2) : etag;
+}
 async function blobReadText(pathname) {
   const result = await get(pathname, { access: "private", useCache: false });
   if (!result || result.statusCode !== 200 || !result.stream) return null;
   const text2 = await new Response(result.stream).text();
-  return { text: text2, etag: result.blob.etag };
+  return { text: text2, etag: result.blob.etag ? strongEtag(result.blob.etag) : void 0 };
 }
 async function blobWriteText(pathname, text2, etag) {
   await put(pathname, text2, {
     access: "private",
     allowOverwrite: true,
     contentType: "application/json",
-    ...etag ? { ifMatch: etag } : {}
+    ...etag ? { ifMatch: strongEtag(etag) } : {}
   });
 }
 async function blobReadFile(pathname) {
@@ -217,7 +220,7 @@ function serialize(name, task) {
 async function updateRows(name, revive, mutate) {
   await serialize(name, async () => {
     let lastError;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
       const { rows, etag } = await readRows(name, revive);
       await mutate(rows);
       try {
@@ -226,6 +229,7 @@ async function updateRows(name, revive, mutate) {
       } catch (error) {
         lastError = error;
         if (!isPreconditionFailed(error)) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)));
       }
     }
     throw lastError;
