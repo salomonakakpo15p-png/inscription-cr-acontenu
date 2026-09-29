@@ -1,4 +1,4 @@
-import { head } from "@vercel/blob";
+import { get, head, put } from "@vercel/blob";
 
 // Inside Vercel functions the OIDC token is delivered through the platform
 // request context (it is not an env var); expose whether it is there.
@@ -7,6 +7,40 @@ function hasOidcContextToken(): boolean {
     Symbol.for("@vercel/request-context")
   ];
   return Boolean(holder?.get?.()?.headers?.["x-vercel-oidc-token"]);
+}
+
+function errText(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+}
+
+// Diagnostic: is the etag reported by get() the one put(ifMatch) expects?
+async function etagDiag(): Promise<Record<string, unknown>> {
+  const out: Record<string, unknown> = {};
+  try {
+    const h = await head("participants.json", {});
+    const g = await get("participants.json", { access: "private", useCache: false });
+    out.headEtag = h.etag?.slice(0, 20) ?? null;
+    out.getEtag = g?.blob?.etag?.slice(0, 20) ?? null;
+    out.etagsAgree = h.etag === g?.blob?.etag;
+    out.size = h.size;
+  } catch (error) {
+    out.readError = errText(error);
+  }
+  try {
+    await put("health-probe.json", "v1", { access: "private", allowOverwrite: true, contentType: "text/plain" });
+    const fresh = await get("health-probe.json", { access: "private", useCache: false });
+    const etag = fresh?.blob?.etag;
+    try {
+      await put("health-probe.json", "v2", { access: "private", allowOverwrite: true, contentType: "text/plain", ifMatch: etag });
+      out.conditionalWrite = "ok";
+    } catch (error) {
+      out.conditionalWrite = errText(error);
+    }
+    out.scratchEtag = etag?.slice(0, 20) ?? null;
+  } catch (error) {
+    out.conditionalWrite = `setup: ${errText(error)}`;
+  }
+  return out;
 }
 
 // Health endpoint used to check that Vercel functions are reachable and that
@@ -47,6 +81,7 @@ export default async function handler(_req: unknown, res: {
       blobConfigured,
       blobProbe,
       hasOidcContext: hasOidcContextToken(),
+      etagDiag: await etagDiag(),
     }),
   );
 }
