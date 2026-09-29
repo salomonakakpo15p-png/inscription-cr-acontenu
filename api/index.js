@@ -109,6 +109,36 @@ var participants = mysqlTable("participants", {
 import path from "node:path";
 var LOCAL_DATA_DIR = process.env.VERCEL ? path.join("/tmp", "data") : path.resolve(process.cwd(), "data");
 
+// server/blob.ts
+import { get, head, put, BlobPreconditionFailedError } from "@vercel/blob";
+function isBlobEnabled() {
+  if (process.env.BLOB_READ_WRITE_TOKEN) return true;
+  return Boolean(process.env.BLOB_STORE_ID && process.env.VERCEL_OIDC_TOKEN);
+}
+function isPreconditionFailed(error) {
+  return error instanceof BlobPreconditionFailedError;
+}
+async function blobReadText(pathname) {
+  const result = await get(pathname, { access: "private", useCache: false });
+  if (!result || result.statusCode !== 200 || !result.stream) return null;
+  const text2 = await new Response(result.stream).text();
+  return { text: text2, etag: result.blob.etag };
+}
+async function blobWriteText(pathname, text2, etag) {
+  await put(pathname, text2, {
+    access: "private",
+    allowOverwrite: true,
+    contentType: "application/json",
+    ...etag ? { ifMatch: etag } : {}
+  });
+}
+async function blobReadFile(pathname) {
+  const result = await get(pathname, { access: "private", useCache: false });
+  if (!result || result.statusCode !== 200 || !result.stream) return null;
+  const data = Buffer.from(await new Response(result.stream).arrayBuffer());
+  return { data, contentType: result.blob.contentType || "application/octet-stream" };
+}
+
 // server/db.ts
 var _db = null;
 var _warned = false;
@@ -124,29 +154,83 @@ async function getDb() {
   return _db;
 }
 var DATA_DIR = LOCAL_DATA_DIR;
-var PARTICIPANTS_FILE = path2.join(DATA_DIR, "participants.json");
-var USERS_FILE = path2.join(DATA_DIR, "users.json");
+var PARTICIPANTS_FILE = "participants.json";
+var USERS_FILE = "users.json";
 function warnFallback() {
   if (_warned) return;
   _warned = true;
-  console.warn(
-    `[Database] DATABASE_URL is not set \u2014 using local file storage in ${DATA_DIR}`
-  );
-}
-async function readRows(file) {
-  try {
-    const raw = await fs.readFile(file, "utf8");
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
+  if (isBlobEnabled()) {
+    console.warn("[Database] DATABASE_URL is not set \u2014 storing data in Vercel Blob");
+  } else if (process.env.VERCEL) {
+    console.warn(
+      "[Database] Neither DATABASE_URL nor a Blob store is configured: registrations are kept in /tmp and will be lost."
+    );
+  } else {
+    console.warn(
+      `[Database] DATABASE_URL is not set \u2014 using local file storage in ${DATA_DIR}`
+    );
   }
 }
-async function writeRows(file, rows) {
+async function readRows(name, revive) {
+  if (isBlobEnabled()) {
+    const read = await blobReadText(name);
+    if (!read) return { rows: [] };
+    try {
+      const parsed = JSON.parse(read.text);
+      return { rows: Array.isArray(parsed) ? parsed.map(revive) : [], etag: read.etag };
+    } catch {
+      return { rows: [], etag: read.etag };
+    }
+  }
+  try {
+    const raw = await fs.readFile(path2.join(DATA_DIR, name), "utf8");
+    const parsed = JSON.parse(raw);
+    return { rows: Array.isArray(parsed) ? parsed.map(revive) : [] };
+  } catch {
+    return { rows: [] };
+  }
+}
+async function writeRows(name, rows, etag) {
+  const json = JSON.stringify(rows, null, 2);
+  if (isBlobEnabled()) {
+    await blobWriteText(name, json, etag);
+    return;
+  }
+  const file = path2.join(DATA_DIR, name);
   await fs.mkdir(path2.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(rows, null, 2), "utf8");
+  await fs.writeFile(tmp, json, "utf8");
   await fs.rename(tmp, file);
+}
+var chains = /* @__PURE__ */ new Map();
+function serialize(name, task) {
+  const previous = chains.get(name) ?? Promise.resolve();
+  const run = previous.then(task, task);
+  chains.set(
+    name,
+    run.then(
+      () => void 0,
+      () => void 0
+    )
+  );
+  return run;
+}
+async function updateRows(name, revive, mutate) {
+  await serialize(name, async () => {
+    let lastError;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { rows, etag } = await readRows(name, revive);
+      await mutate(rows);
+      try {
+        await writeRows(name, rows, etag);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (!isPreconditionFailed(error)) throw error;
+      }
+    }
+    throw lastError;
+  });
 }
 function reviveParticipant(row) {
   return { ...row, createdAt: new Date(row.createdAt), photoUrl: row.photoUrl ?? null };
@@ -159,33 +243,33 @@ async function upsertUser(user) {
   const db = await getDb();
   if (!db) {
     warnFallback();
-    const rows = (await readRows(USERS_FILE)).map(reviveUser);
-    const existing = rows.find((row) => row.openId === user.openId);
-    const now = /* @__PURE__ */ new Date();
-    if (existing) {
-      const textFields2 = ["name", "email", "loginMethod"];
-      for (const field of textFields2) {
-        if (user[field] !== void 0) existing[field] = user[field] ?? null;
+    await updateRows(USERS_FILE, reviveUser, (rows) => {
+      const existing = rows.find((row) => row.openId === user.openId);
+      const now = /* @__PURE__ */ new Date();
+      if (existing) {
+        const textFields2 = ["name", "email", "loginMethod"];
+        for (const field of textFields2) {
+          if (user[field] !== void 0) existing[field] = user[field] ?? null;
+        }
+        if (user.role !== void 0) existing.role = user.role;
+        else if (user.openId === ENV.ownerOpenId) existing.role = "admin";
+        if (user.lastSignedIn !== void 0) existing.lastSignedIn = user.lastSignedIn;
+        else existing.lastSignedIn = now;
+        existing.updatedAt = now;
+      } else {
+        rows.push({
+          id: rows.reduce((max, row) => Math.max(max, row.id), 0) + 1,
+          openId: user.openId,
+          name: user.name ?? null,
+          email: user.email ?? null,
+          loginMethod: user.loginMethod ?? null,
+          role: user.role ?? (user.openId === ENV.ownerOpenId ? "admin" : "user"),
+          createdAt: now,
+          updatedAt: now,
+          lastSignedIn: user.lastSignedIn ?? now
+        });
       }
-      if (user.role !== void 0) existing.role = user.role;
-      else if (user.openId === ENV.ownerOpenId) existing.role = "admin";
-      if (user.lastSignedIn !== void 0) existing.lastSignedIn = user.lastSignedIn;
-      else existing.lastSignedIn = now;
-      existing.updatedAt = now;
-    } else {
-      rows.push({
-        id: rows.reduce((max, row) => Math.max(max, row.id), 0) + 1,
-        openId: user.openId,
-        name: user.name ?? null,
-        email: user.email ?? null,
-        loginMethod: user.loginMethod ?? null,
-        role: user.role ?? (user.openId === ENV.ownerOpenId ? "admin" : "user"),
-        createdAt: now,
-        updatedAt: now,
-        lastSignedIn: user.lastSignedIn ?? now
-      });
-    }
-    await writeRows(USERS_FILE, rows);
+    });
     return;
   }
   const values = { openId: user.openId };
@@ -206,7 +290,6 @@ async function upsertUser(user) {
     updateSet.role = user.role;
   } else if (user.openId === ENV.ownerOpenId) {
     values.role = "admin";
-    updateSet.role = "admin";
   }
   values.lastSignedIn ??= /* @__PURE__ */ new Date();
   if (Object.keys(updateSet).length === 0) updateSet.lastSignedIn = /* @__PURE__ */ new Date();
@@ -215,8 +298,8 @@ async function upsertUser(user) {
 async function getUserByOpenId(openId) {
   const db = await getDb();
   if (!db) {
-    const rows = await readRows(USERS_FILE);
-    return rows.map(reviveUser).find((row) => row.openId === openId);
+    const { rows } = await readRows(USERS_FILE, reviveUser);
+    return rows.find((row) => row.openId === openId);
   }
   const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
   return result[0];
@@ -225,17 +308,18 @@ async function createParticipant(input) {
   const db = await getDb();
   if (!db) {
     warnFallback();
-    const rows = (await readRows(PARTICIPANTS_FILE)).map(reviveParticipant);
-    const id = rows.reduce((max, row) => Math.max(max, row.id), 0) + 1;
-    rows.push({
-      id,
-      lastName: input.lastName,
-      firstName: input.firstName,
-      country: input.country,
-      photoUrl: input.photoUrl ?? null,
-      createdAt: input.createdAt ?? /* @__PURE__ */ new Date()
+    let id = 0;
+    await updateRows(PARTICIPANTS_FILE, reviveParticipant, (rows) => {
+      id = rows.reduce((max, row) => Math.max(max, row.id), 0) + 1;
+      rows.push({
+        id,
+        lastName: input.lastName,
+        firstName: input.firstName,
+        country: input.country,
+        photoUrl: input.photoUrl ?? null,
+        createdAt: input.createdAt ?? /* @__PURE__ */ new Date()
+      });
     });
-    await writeRows(PARTICIPANTS_FILE, rows);
     return { id, ...input };
   }
   const result = await db.insert(participants).values(input);
@@ -245,7 +329,7 @@ async function listParticipants() {
   const db = await getDb();
   if (!db) {
     warnFallback();
-    const rows = (await readRows(PARTICIPANTS_FILE)).map(reviveParticipant);
+    const { rows } = await readRows(PARTICIPANTS_FILE, reviveParticipant);
     return rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   }
   return db.select().from(participants).orderBy(desc(participants.createdAt));
@@ -254,8 +338,10 @@ async function deleteParticipant(id) {
   const db = await getDb();
   if (!db) {
     warnFallback();
-    const rows = (await readRows(PARTICIPANTS_FILE)).map(reviveParticipant).filter((row) => row.id !== id);
-    await writeRows(PARTICIPANTS_FILE, rows);
+    await updateRows(PARTICIPANTS_FILE, reviveParticipant, (rows) => {
+      const index = rows.findIndex((row) => row.id === id);
+      if (index >= 0) rows.splice(index, 1);
+    });
     return { success: true };
   }
   await db.delete(participants).where(eq(participants.id, id));
@@ -656,6 +742,7 @@ var systemRouter = router({
 // server/storage.ts
 import { promises as fs2 } from "node:fs";
 import path3 from "node:path";
+import { put as put2 } from "@vercel/blob";
 var LOCAL_UPLOAD_DIR = path3.join(LOCAL_DATA_DIR, "uploads");
 function getForgeConfig() {
   const forgeUrl = ENV.forgeApiUrl;
@@ -688,7 +775,15 @@ async function storagePut(relKey, data, contentType = "application/octet-stream"
   const key = appendHashSuffix(normalizeKey(relKey));
   const forge = getForgeConfig();
   if (!forge) {
-    return storagePutLocal(sanitizeKey(key), data);
+    const localKey = sanitizeKey(key);
+    if (isBlobEnabled()) {
+      const blob2 = await put2(localKey, typeof data === "string" ? data : Buffer.from(data), {
+        access: "private",
+        contentType
+      });
+      return { key: blob2.pathname, url: `/uploads/${blob2.pathname}` };
+    }
+    return storagePutLocal(localKey, data);
   }
   const { forgeUrl, forgeKey } = forge;
   const presignUrl = new URL("v1/storage/presign/put", forgeUrl + "/");
@@ -899,14 +994,32 @@ function createApp() {
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   registerStorageProxy(app);
   registerOAuthRoutes(app);
-  app.use(
-    "/uploads",
-    express.static(LOCAL_UPLOAD_DIR, {
-      index: false,
-      fallthrough: false,
-      setHeaders: (res) => res.setHeader("Cache-Control", "public, max-age=31536000, immutable")
-    })
-  );
+  if (isBlobEnabled()) {
+    app.get("/uploads/*", async (req, res) => {
+      try {
+        const file = await blobReadFile(String(req.params[0] ?? ""));
+        if (!file) {
+          res.status(404).type("text/plain").end("Fichier introuvable");
+          return;
+        }
+        res.setHeader("Content-Type", file.contentType);
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        res.end(file.data);
+      } catch (error) {
+        console.error("[uploads] lecture impossible:", error);
+        res.status(500).type("text/plain").end("Lecture de la photo impossible");
+      }
+    });
+  } else {
+    app.use(
+      "/uploads",
+      express.static(LOCAL_UPLOAD_DIR, {
+        index: false,
+        fallthrough: false,
+        setHeaders: (res) => res.setHeader("Cache-Control", "public, max-age=31536000, immutable")
+      })
+    );
+  }
   app.use(
     "/api/trpc",
     createExpressMiddleware({

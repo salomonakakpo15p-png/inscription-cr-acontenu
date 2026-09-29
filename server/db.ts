@@ -12,6 +12,7 @@ import {
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 import { LOCAL_DATA_DIR } from "./_core/paths";
+import { blobReadText, blobWriteText, isBlobEnabled, isPreconditionFailed } from "./blob";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 let _warned = false;
@@ -28,37 +29,106 @@ export async function getDb() {
   return _db;
 }
 
-// Local file fallback used when DATABASE_URL is not configured, so
-// registrations still work on a machine without a MySQL server.
+// Fallbacks used when DATABASE_URL is not configured: Vercel Blob when a store
+// is connected (persistent, shared by every instance), local files otherwise.
 const DATA_DIR = LOCAL_DATA_DIR;
-const PARTICIPANTS_FILE = path.join(DATA_DIR, "participants.json");
-const USERS_FILE = path.join(DATA_DIR, "users.json");
+const PARTICIPANTS_FILE = "participants.json";
+const USERS_FILE = "users.json";
 
 type Serialized<T> = Omit<T, "createdAt"> & { createdAt: string | Date };
 
 function warnFallback() {
   if (_warned) return;
   _warned = true;
-  console.warn(
-    `[Database] DATABASE_URL is not set — using local file storage in ${DATA_DIR}`,
-  );
-}
-
-async function readRows<T>(file: string): Promise<T[]> {
-  try {
-    const raw = await fs.readFile(file, "utf8");
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as T[]) : [];
-  } catch {
-    return [];
+  if (isBlobEnabled()) {
+    console.warn("[Database] DATABASE_URL is not set — storing data in Vercel Blob");
+  } else if (process.env.VERCEL) {
+    console.warn(
+      "[Database] Neither DATABASE_URL nor a Blob store is configured: registrations are kept in /tmp and will be lost.",
+    );
+  } else {
+    console.warn(
+      `[Database] DATABASE_URL is not set — using local file storage in ${DATA_DIR}`,
+    );
   }
 }
 
-async function writeRows(file: string, rows: unknown[]): Promise<void> {
+async function readRows<T>(
+  name: string,
+  revive: (row: Serialized<T>) => T,
+): Promise<{ rows: T[]; etag?: string }> {
+  if (isBlobEnabled()) {
+    const read = await blobReadText(name);
+    if (!read) return { rows: [] };
+    try {
+      const parsed = JSON.parse(read.text);
+      return { rows: Array.isArray(parsed) ? parsed.map(revive) : [], etag: read.etag };
+    } catch {
+      return { rows: [], etag: read.etag };
+    }
+  }
+
+  try {
+    const raw = await fs.readFile(path.join(DATA_DIR, name), "utf8");
+    const parsed = JSON.parse(raw);
+    return { rows: Array.isArray(parsed) ? parsed.map(revive) : [] };
+  } catch {
+    return { rows: [] };
+  }
+}
+
+async function writeRows(name: string, rows: unknown[], etag?: string): Promise<void> {
+  const json = JSON.stringify(rows, null, 2);
+
+  if (isBlobEnabled()) {
+    await blobWriteText(name, json, etag);
+    return;
+  }
+
+  const file = path.join(DATA_DIR, name);
   await fs.mkdir(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(rows, null, 2), "utf8");
+  await fs.writeFile(tmp, json, "utf8");
   await fs.rename(tmp, file);
+}
+
+// Serialises read-modify-write cycles per file inside this process; the ETag
+// check on Blob protects against writers running in another instance.
+const chains = new Map<string, Promise<unknown>>();
+
+function serialize<T>(name: string, task: () => Promise<T>): Promise<T> {
+  const previous = chains.get(name) ?? Promise.resolve();
+  const run = previous.then(task, task);
+  chains.set(
+    name,
+    run.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return run;
+}
+
+async function updateRows<T>(
+  name: string,
+  revive: (row: Serialized<T>) => T,
+  mutate: (rows: T[]) => void | Promise<void>,
+): Promise<void> {
+  await serialize(name, async () => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { rows, etag } = await readRows<T>(name, revive);
+      await mutate(rows);
+      try {
+        await writeRows(name, rows, etag);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (!isPreconditionFailed(error)) throw error;
+      }
+    }
+    throw lastError;
+  });
 }
 
 function reviveParticipant(row: Serialized<Participant>): Participant {
@@ -75,35 +145,34 @@ export async function upsertUser(user: InsertUser): Promise<void> {
 
   if (!db) {
     warnFallback();
-    const rows = (await readRows<Serialized<User>>(USERS_FILE)).map(reviveUser);
-    const existing = rows.find(row => row.openId === user.openId);
-    const now = new Date();
+    await updateRows<User>(USERS_FILE, reviveUser, rows => {
+      const existing = rows.find(row => row.openId === user.openId);
+      const now = new Date();
 
-    if (existing) {
-      const textFields = ["name", "email", "loginMethod"] as const;
-      for (const field of textFields) {
-        if (user[field] !== undefined) existing[field] = user[field] ?? null;
+      if (existing) {
+        const textFields = ["name", "email", "loginMethod"] as const;
+        for (const field of textFields) {
+          if (user[field] !== undefined) existing[field] = user[field] ?? null;
+        }
+        if (user.role !== undefined) existing.role = user.role;
+        else if (user.openId === ENV.ownerOpenId) existing.role = "admin";
+        if (user.lastSignedIn !== undefined) existing.lastSignedIn = user.lastSignedIn;
+        else existing.lastSignedIn = now;
+        existing.updatedAt = now;
+      } else {
+        rows.push({
+          id: rows.reduce((max, row) => Math.max(max, row.id), 0) + 1,
+          openId: user.openId,
+          name: user.name ?? null,
+          email: user.email ?? null,
+          loginMethod: user.loginMethod ?? null,
+          role: user.role ?? (user.openId === ENV.ownerOpenId ? "admin" : "user"),
+          createdAt: now,
+          updatedAt: now,
+          lastSignedIn: user.lastSignedIn ?? now,
+        });
       }
-      if (user.role !== undefined) existing.role = user.role;
-      else if (user.openId === ENV.ownerOpenId) existing.role = "admin";
-      if (user.lastSignedIn !== undefined) existing.lastSignedIn = user.lastSignedIn;
-      else existing.lastSignedIn = now;
-      existing.updatedAt = now;
-    } else {
-      rows.push({
-        id: rows.reduce((max, row) => Math.max(max, row.id), 0) + 1,
-        openId: user.openId,
-        name: user.name ?? null,
-        email: user.email ?? null,
-        loginMethod: user.loginMethod ?? null,
-        role: user.role ?? (user.openId === ENV.ownerOpenId ? "admin" : "user"),
-        createdAt: now,
-        updatedAt: now,
-        lastSignedIn: user.lastSignedIn ?? now,
-      });
-    }
-
-    await writeRows(USERS_FILE, rows);
+    });
     return;
   }
 
@@ -125,7 +194,6 @@ export async function upsertUser(user: InsertUser): Promise<void> {
     updateSet.role = user.role;
   } else if (user.openId === ENV.ownerOpenId) {
     values.role = "admin";
-    updateSet.role = "admin";
   }
   values.lastSignedIn ??= new Date();
   if (Object.keys(updateSet).length === 0) updateSet.lastSignedIn = new Date();
@@ -137,8 +205,8 @@ export async function getUserByOpenId(openId: string) {
   const db = await getDb();
 
   if (!db) {
-    const rows = await readRows<Serialized<User>>(USERS_FILE);
-    return rows.map(reviveUser).find(row => row.openId === openId);
+    const { rows } = await readRows<User>(USERS_FILE, reviveUser);
+    return rows.find(row => row.openId === openId);
   }
 
   const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
@@ -150,17 +218,18 @@ export async function createParticipant(input: InsertParticipant) {
 
   if (!db) {
     warnFallback();
-    const rows = (await readRows<Serialized<Participant>>(PARTICIPANTS_FILE)).map(reviveParticipant);
-    const id = rows.reduce((max, row) => Math.max(max, row.id), 0) + 1;
-    rows.push({
-      id,
-      lastName: input.lastName,
-      firstName: input.firstName,
-      country: input.country,
-      photoUrl: input.photoUrl ?? null,
-      createdAt: input.createdAt ?? new Date(),
+    let id = 0;
+    await updateRows<Participant>(PARTICIPANTS_FILE, reviveParticipant, rows => {
+      id = rows.reduce((max, row) => Math.max(max, row.id), 0) + 1;
+      rows.push({
+        id,
+        lastName: input.lastName,
+        firstName: input.firstName,
+        country: input.country,
+        photoUrl: input.photoUrl ?? null,
+        createdAt: input.createdAt ?? new Date(),
+      });
     });
-    await writeRows(PARTICIPANTS_FILE, rows);
     return { id, ...input };
   }
 
@@ -173,7 +242,7 @@ export async function listParticipants() {
 
   if (!db) {
     warnFallback();
-    const rows = (await readRows<Serialized<Participant>>(PARTICIPANTS_FILE)).map(reviveParticipant);
+    const { rows } = await readRows<Participant>(PARTICIPANTS_FILE, reviveParticipant);
     return rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   }
 
@@ -185,10 +254,10 @@ export async function deleteParticipant(id: number) {
 
   if (!db) {
     warnFallback();
-    const rows = (await readRows<Serialized<Participant>>(PARTICIPANTS_FILE))
-      .map(reviveParticipant)
-      .filter(row => row.id !== id);
-    await writeRows(PARTICIPANTS_FILE, rows);
+    await updateRows<Participant>(PARTICIPANTS_FILE, reviveParticipant, rows => {
+      const index = rows.findIndex(row => row.id === id);
+      if (index >= 0) rows.splice(index, 1);
+    });
     return { success: true } as const;
   }
 

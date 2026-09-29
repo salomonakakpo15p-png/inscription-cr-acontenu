@@ -5,6 +5,7 @@ import { createContext } from "./_core/context";
 import { registerOAuthRoutes } from "./_core/oauth";
 import { registerStorageProxy } from "./_core/storageProxy";
 import { LOCAL_UPLOAD_DIR } from "./storage";
+import { blobReadFile, isBlobEnabled } from "./blob";
 
 /**
  * Builds the Express application (body parsing, OAuth routes, local uploads
@@ -23,14 +24,34 @@ export function createApp() {
   registerStorageProxy(app);
   registerOAuthRoutes(app);
   // Local uploads (used when the remote storage backend is not configured).
-  app.use(
-    "/uploads",
-    express.static(LOCAL_UPLOAD_DIR, {
-      index: false,
-      fallthrough: false,
-      setHeaders: res => res.setHeader("Cache-Control", "public, max-age=31536000, immutable"),
-    }),
-  );
+  if (isBlobEnabled()) {
+    // Photos live in Vercel Blob: stream them through the function so the
+    // store can stay private.
+    app.get("/uploads/*", async (req, res) => {
+      try {
+        const file = await blobReadFile(String((req.params as Record<string, string>)[0] ?? ""));
+        if (!file) {
+          res.status(404).type("text/plain").end("Fichier introuvable");
+          return;
+        }
+        res.setHeader("Content-Type", file.contentType);
+        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        res.end(file.data);
+      } catch (error) {
+        console.error("[uploads] lecture impossible:", error);
+        res.status(500).type("text/plain").end("Lecture de la photo impossible");
+      }
+    });
+  } else {
+    app.use(
+      "/uploads",
+      express.static(LOCAL_UPLOAD_DIR, {
+        index: false,
+        fallthrough: false,
+        setHeaders: res => res.setHeader("Cache-Control", "public, max-age=31536000, immutable"),
+      }),
+    );
+  }
   // tRPC API
   app.use(
     "/api/trpc",

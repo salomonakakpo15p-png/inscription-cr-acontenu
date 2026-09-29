@@ -23,6 +23,10 @@ export default function handler(_req: unknown, res: {
       adminConfigured: Boolean(process.env.ADMIN_PASSWORD),
       jwtConfigured: Boolean(process.env.JWT_SECRET),
       databaseConfigured: Boolean(process.env.DATABASE_URL),
+      blobConfigured: Boolean(
+        process.env.BLOB_READ_WRITE_TOKEN ||
+          (process.env.BLOB_STORE_ID && process.env.VERCEL_OIDC_TOKEN),
+      ),
     }),
   );
 }

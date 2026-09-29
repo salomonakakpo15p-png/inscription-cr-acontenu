@@ -6,8 +6,10 @@
 
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { put } from "@vercel/blob";
 import { ENV } from "./_core/env";
 import { LOCAL_DATA_DIR } from "./_core/paths";
+import { isBlobEnabled } from "./blob";
 
 /** Where local uploads land when the Forge backend is not configured. */
 export const LOCAL_UPLOAD_DIR = path.join(LOCAL_DATA_DIR, "uploads");
@@ -61,7 +63,16 @@ export async function storagePut(
   const forge = getForgeConfig();
 
   if (!forge) {
-    return storagePutLocal(sanitizeKey(key), data);
+    const localKey = sanitizeKey(key);
+    if (isBlobEnabled()) {
+      const blob = await put(localKey, typeof data === "string" ? data : Buffer.from(data), {
+        access: "private",
+        contentType,
+      });
+      // Served through /uploads so the storage backend stays private.
+      return { key: blob.pathname, url: `/uploads/${blob.pathname}` };
+    }
+    return storagePutLocal(localKey, data);
   }
 
   const { forgeUrl, forgeKey } = forge;
