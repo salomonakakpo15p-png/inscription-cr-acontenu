@@ -1,14 +1,13 @@
 import { get, head, put, BlobPreconditionFailedError } from "@vercel/blob";
 
 /**
- * Vercel Blob is used as soon as a store is connected to the project: OIDC
- * credentials (`BLOB_STORE_ID` + `VERCEL_OIDC_TOKEN`) are added automatically,
- * and a store created from the dashboard also provides `BLOB_READ_WRITE_TOKEN`.
+ * Vercel Blob is used as soon as a store is connected to the project. Inside
+ * functions the SDK picks the OIDC token up from the platform request context
+ * (`BLOB_STORE_ID`), and falls back to `BLOB_READ_WRITE_TOKEN` elsewhere.
  * Without either, the app keeps writing to the local disk (development).
  */
 export function isBlobEnabled(): boolean {
-  if (process.env.BLOB_READ_WRITE_TOKEN) return true;
-  return Boolean(process.env.BLOB_STORE_ID && process.env.VERCEL_OIDC_TOKEN);
+  return Boolean(process.env.BLOB_STORE_ID || process.env.BLOB_READ_WRITE_TOKEN);
 }
 
 export function isPreconditionFailed(error: unknown): boolean {

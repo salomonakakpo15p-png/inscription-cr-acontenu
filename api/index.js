@@ -112,8 +112,7 @@ var LOCAL_DATA_DIR = process.env.VERCEL ? path.join("/tmp", "data") : path.resol
 // server/blob.ts
 import { get, head, put, BlobPreconditionFailedError } from "@vercel/blob";
 function isBlobEnabled() {
-  if (process.env.BLOB_READ_WRITE_TOKEN) return true;
-  return Boolean(process.env.BLOB_STORE_ID && process.env.VERCEL_OIDC_TOKEN);
+  return Boolean(process.env.BLOB_STORE_ID || process.env.BLOB_READ_WRITE_TOKEN);
 }
 function isPreconditionFailed(error) {
   return error instanceof BlobPreconditionFailedError;
