@@ -34,16 +34,13 @@ export default async function handler(_req: unknown, res: {
 
   res.statusCode = 200;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
-  // Names only, never values: shows which variables the function receives, so
-  // a missing store or a typo such as Admin_Password is visible immediately.
+  // Booleans and error strings only: never exposes a secret value.
   res.end(
     JSON.stringify({
       ok: true,
       node: process.version,
       vercel: Boolean(process.env.VERCEL),
       vercelEnv: process.env.VERCEL_ENV ?? null,
-      envCount: Object.keys(process.env).length,
-      envKeys: Object.keys(process.env).sort(),
       adminConfigured: Boolean(process.env.ADMIN_PASSWORD),
       jwtConfigured: Boolean(process.env.JWT_SECRET),
       databaseConfigured: Boolean(process.env.DATABASE_URL),
