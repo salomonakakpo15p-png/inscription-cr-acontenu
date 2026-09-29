@@ -1,5 +1,14 @@
 import { head } from "@vercel/blob";
 
+// Inside Vercel functions the OIDC token is delivered through the platform
+// request context (it is not an env var); expose whether it is there.
+function hasOidcContextToken(): boolean {
+  const holder = (globalThis as unknown as Record<symbol, { get?: () => { headers?: Record<string, string | undefined> } } | undefined>)[
+    Symbol.for("@vercel/request-context")
+  ];
+  return Boolean(holder?.get?.()?.headers?.["x-vercel-oidc-token"]);
+}
+
 // Health endpoint used to check that Vercel functions are reachable and that
 // the required environment (admin, session, storage) is actually delivered.
 export default async function handler(_req: unknown, res: {
@@ -7,13 +16,12 @@ export default async function handler(_req: unknown, res: {
   setHeader(name: string, value: string): void;
   end(body: string): void;
 }) {
-  const blobConfigured = Boolean(
-    process.env.BLOB_READ_WRITE_TOKEN ||
-      (process.env.BLOB_STORE_ID && process.env.VERCEL_OIDC_TOKEN),
-  );
+  // A connected store provides `BLOB_STORE_ID`; in functions the OIDC token is
+  // carried by the request context, not by an env var — so probe for real.
+  const blobConfigured = Boolean(process.env.BLOB_STORE_ID || process.env.BLOB_READ_WRITE_TOKEN);
 
-  // Live credential check: a "not found" answer proves the store is reachable,
-  // any other answer (missing credentials, forbidden) explains why not.
+  // Live credential check: "not found" proves the store is reachable, any
+  // other answer (missing credentials, forbidden) explains why not.
   let blobProbe: string | null = null;
   if (blobConfigured) {
     try {
@@ -41,6 +49,7 @@ export default async function handler(_req: unknown, res: {
       databaseConfigured: Boolean(process.env.DATABASE_URL),
       blobConfigured,
       blobProbe,
+      hasOidcContext: hasOidcContextToken(),
     }),
   );
 }
