@@ -48,11 +48,13 @@ async function etagDiag(): Promise<Record<string, unknown>> {
 
 // Health endpoint used to check that Vercel functions are reachable and that
 // the required environment (admin, session, storage) is actually delivered.
-export default async function handler(_req: unknown, res: {
+// Pass `?diag=1` for the slower Blob/etag diagnostics.
+export default async function handler(req: { url?: string }, res: {
   statusCode: number;
   setHeader(name: string, value: string): void;
   end(body: string): void;
 }) {
+  const wantDiag = Boolean(req?.url?.includes("diag=1"));
   // A connected store provides `BLOB_STORE_ID`; in functions the OIDC token is
   // carried by the request context, not by an env var — so probe for real.
   const blobConfigured = Boolean(process.env.BLOB_STORE_ID || process.env.BLOB_READ_WRITE_TOKEN);
@@ -84,7 +86,7 @@ export default async function handler(_req: unknown, res: {
       blobConfigured,
       blobProbe,
       hasOidcContext: hasOidcContextToken(),
-      etagDiag: await etagDiag(),
+      etagDiag: wantDiag ? await etagDiag() : undefined,
     }),
   );
 }
